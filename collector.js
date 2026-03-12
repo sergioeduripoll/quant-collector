@@ -9,7 +9,7 @@ const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- CONFIGURACIÓN DE ACTIVOS ---
-// Ajustamos los símbolos al formato de KuCoin (ej: BTC-USDT)
+// Usamos el formato CON guion porque es el que exige KuCoin
 const ASSETS = [
     'BTC-USDT', 'ETH-USDT', 'ADA-USDT', 'LTC-USDT',
     'SOL-USDT', 'XRP-USDT', 'DOGE-USDT', 'BNB-USDT'
@@ -25,23 +25,21 @@ app.get('/', (req, res) => res.send('🚀 QUANT SNIPER COLLECTOR - ACTIVO Y OPER
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[CLOUD] Servidor de latido en puerto ${PORT}`));
 
-async function syncCandlesForAsset(symbol) {
-    // Normalizamos el símbolo para la BD de Supabase (sin guión) para mantener la compatibilidad con tu front-end
-    const dbSymbol = symbol.replace('-', '');
+async function syncCandlesForAsset(kucoinSymbol) {
+    // Para Supabase y para tus logs, usamos el símbolo SIN guion (ej. BTCUSDT)
+    const dbSymbol = kucoinSymbol.replace('-', '');
     
     try {
-        // 1. Ver la última vela registrada
         const { data: lastCandle, error: dbError } = await supabase
             .from('candles')
             .select('timestamp')
             .eq('symbol', dbSymbol)
-            .eq('interval', '5m') // Mantenemos '5m' en la BD
+            .eq('interval', '5m') 
             .order('timestamp', { ascending: false })
             .limit(1);
 
         if (dbError) throw dbError;
 
-        // 2. SISTEMA DE AUTO-SANACIÓN
         const { count, error: countError } = await supabase
             .from('candles')
             .select('*', { count: 'exact', head: true })
@@ -52,7 +50,7 @@ async function syncCandlesForAsset(symbol) {
         
         if (count < 49000) {
             console.log(`   [!] ${dbSymbol} tiene solo ${count || 0} velas en DB. Forzando descarga histórica profunda...`);
-            startTime = Math.floor(Date.now() / 1000) - (TARGET_CANDLES * 5 * 60); // KuCoin usa segundos
+            startTime = Math.floor(Date.now() / 1000) - (TARGET_CANDLES * 5 * 60); 
         } else if (lastCandle && lastCandle.length > 0) {
             startTime = Math.floor(lastCandle[0].timestamp / 1000); 
         } else {
@@ -64,43 +62,41 @@ async function syncCandlesForAsset(symbol) {
         let retries = 0;
 
         while (keepFetching) {
-            // API de KuCoin: Max 1500 velas por petición. Pasamos startAt y endAt
             const endAt = startTime + (1500 * 5 * 60);
-            const url = `https://api.kucoin.com/api/v1/market/candles?type=${INTERVAL}&symbol=${symbol}&startAt=${startTime + 1}&endAt=${endAt}`;
+            // Le pedimos a KuCoin usando el símbolo CON guion (kucoinSymbol)
+            const url = `https://api.kucoin.com/api/v1/market/candles?type=${INTERVAL}&symbol=${kucoinSymbol}&startAt=${startTime + 1}&endAt=${endAt}`;
             
             let res;
             try {
                 res = await axios.get(url, { timeout: 15000 });
                 retries = 0; 
             } catch (axiosError) {
-                console.log(`   [!] Reintentando ${symbol}... (Motivo: ${axiosError.message})`);
+                console.log(`   [!] Reintentando ${dbSymbol}... (Motivo: ${axiosError.message})`);
                 retries++;
                 if (retries >= 3) {
-                    console.error(`   [X] Abortando descarga de ${symbol} tras 3 fallos.`);
+                    console.error(`   [X] Abortando descarga de ${dbSymbol} tras 3 fallos.`);
                     break; 
                 }
                 await new Promise(r => setTimeout(r, 2000)); 
                 continue;
             }
             
-            // KuCoin devuelve los datos en res.data.data
             if (!res || !res.data || !res.data.data || res.data.data.length === 0) {
                 keepFetching = false;
                 break;
             }
 
             const klines = res.data.data;
-            // KuCoin devuelve del más nuevo al más viejo, hay que revertir
             klines.reverse(); 
 
             const rows = klines.map(c => ({
-                symbol: dbSymbol, // Guardamos sin guión para compatibilidad (ej: BTCUSDT)
+                symbol: dbSymbol, // Lo guardamos SIN guion
                 interval: '5m',
-                timestamp: parseInt(c[0]) * 1000, // Convertir de segundos a milisegundos
+                timestamp: parseInt(c[0]) * 1000, 
                 open: parseFloat(c[1]),
-                high: parseFloat(c[3]), // En KuCoin el High es el índice 3
-                low: parseFloat(c[4]),  // En KuCoin el Low es el índice 4
-                close: parseFloat(c[2]),// En KuCoin el Close es el índice 2
+                high: parseFloat(c[3]), 
+                low: parseFloat(c[4]),  
+                close: parseFloat(c[2]),
                 volume: parseFloat(c[5])
             }));
 
@@ -112,17 +108,15 @@ async function syncCandlesForAsset(symbol) {
             if (error) throw error;
 
             totalSavedInThisSession += rows.length;
-            
-            // Actualizamos startTime para la siguiente iteración
             startTime = parseInt(klines[klines.length - 1][0]);
             
             if (klines.length < 1500) keepFetching = false;
             
-            await new Promise(r => setTimeout(r, 500)); // Límite de KuCoin
+            await new Promise(r => setTimeout(r, 500)); 
         }
         console.log(`   [OK] ${dbSymbol} sincronizado (+${totalSavedInThisSession} velas).`);
     } catch (error) {
-        console.error(`   [X] Error fatal en ${symbol}:`, error.message);
+        console.error(`   [X] Error fatal en ${dbSymbol}:`, error.message);
     }
 }
 
@@ -140,5 +134,4 @@ async function runCollector() {
     setTimeout(runCollector, 5 * 60 * 1000);
 }
 
-// Arrancar el motor
 runCollector();
