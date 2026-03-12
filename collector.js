@@ -10,9 +10,8 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- CONFIGURACIÓN DE ACTIVOS ---
 const ASSETS = [
-    'BTCUSDT', 'AAVEUSDT', 'BCHUSDT', 'ADAUSDT',
-    'LINKUSDT', 'ETHUSDT', 'LTCUSDT', 'SOLUSDT',
-    'UNIUSDT', 'CAKEUSDT', 'FETUSDT', 'ICPUSDT'
+    'BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'LTCUSDT',
+    'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT'
 ];
 const INTERVAL = '5m';
 const TARGET_CANDLES = 50000;
