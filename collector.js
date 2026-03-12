@@ -9,13 +9,11 @@ const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- CONFIGURACIÓN DE ACTIVOS ---
-// Usamos el formato CON guion porque es el que exige KuCoin
 const ASSETS = [
     'BTC-USDT', 'ETH-USDT', 'ADA-USDT', 'LTC-USDT',
     'SOL-USDT', 'XRP-USDT', 'DOGE-USDT', 'BNB-USDT'
 ];
 
-// KuCoin exige el string '5min' exactamente así para su API
 const INTERVAL = '5min'; 
 const TARGET_CANDLES = 50000;
 
@@ -26,7 +24,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[CLOUD] Servidor de latido en puerto ${PORT}`));
 
 async function syncCandlesForAsset(kucoinSymbol) {
-    // Para Supabase y para tus logs, usamos el símbolo SIN guion (ej. BTCUSDT)
     const dbSymbol = kucoinSymbol.replace('-', '');
     
     try {
@@ -34,7 +31,7 @@ async function syncCandlesForAsset(kucoinSymbol) {
             .from('candles')
             .select('timestamp')
             .eq('symbol', dbSymbol)
-            .eq('interval', '5m') // Mantenemos el '5m' antiguo para la base de datos
+            .eq('interval', '5m') 
             .order('timestamp', { ascending: false })
             .limit(1);
 
@@ -47,14 +44,18 @@ async function syncCandlesForAsset(kucoinSymbol) {
             .eq('interval', '5m');
 
         let startTime;
+        let isDeepFetch = false; // Bandera para saber si estamos en modo "Sanación"
         
         if (count < 49000) {
-            console.log(`   [!] ${dbSymbol} tiene solo ${count || 0} velas en DB. Forzando descarga histórica profunda...`);
+            console.log(`   [!] ${dbSymbol} tiene solo ${count || 0} velas en DB. Iniciando MODO TURBO para llegar a 50k...`);
+            // Calculamos la fecha de hace 50.000 velas atrás
             startTime = Math.floor(Date.now() / 1000) - (TARGET_CANDLES * 5 * 60); 
+            isDeepFetch = true;
         } else if (lastCandle && lastCandle.length > 0) {
             startTime = Math.floor(lastCandle[0].timestamp / 1000); 
         } else {
             startTime = Math.floor(Date.now() / 1000) - (TARGET_CANDLES * 5 * 60);
+            isDeepFetch = true;
         }
 
         let totalSavedInThisSession = 0;
@@ -62,8 +63,8 @@ async function syncCandlesForAsset(kucoinSymbol) {
         let retries = 0;
 
         while (keepFetching) {
-            const endAt = startTime + (1500 * 5 * 60);
-            // Petición a KuCoin
+            // Bloques de 1500 velas (el máximo de KuCoin)
+            const endAt = startTime + (1500 * 5 * 60); 
             const url = `https://api.kucoin.com/api/v1/market/candles?type=${INTERVAL}&symbol=${kucoinSymbol}&startAt=${startTime + 1}&endAt=${endAt}`;
             
             let res;
@@ -90,8 +91,8 @@ async function syncCandlesForAsset(kucoinSymbol) {
             klines.reverse(); 
 
             const rows = klines.map(c => ({
-                symbol: dbSymbol, // Lo guardamos SIN guion
-                interval: '5m',   // Lo guardamos como '5m'
+                symbol: dbSymbol, 
+                interval: '5m',   
                 timestamp: parseInt(c[0]) * 1000, 
                 open: parseFloat(c[1]),
                 high: parseFloat(c[3]), 
@@ -110,11 +111,22 @@ async function syncCandlesForAsset(kucoinSymbol) {
             totalSavedInThisSession += rows.length;
             startTime = parseInt(klines[klines.length - 1][0]);
             
-            if (klines.length < 1500) keepFetching = false;
-            
-            await new Promise(r => setTimeout(r, 500)); 
+            // LA CLAVE ESTÁ ACÁ: Solo frenamos si KuCoin nos devolvió menos de 1500 
+            // (lo que significa que ya llegamos al minuto actual).
+            if (klines.length < 1500) {
+                keepFetching = false;
+            } else if (isDeepFetch) {
+                // Si estamos en MODO TURBO llenando la base, imprimimos el progreso parcial
+                process.stdout.write(`\r   [*] ${dbSymbol} Progreso: ${totalSavedInThisSession} velas descargadas...`);
+                // Le damos 1 segundo de pausa a KuCoin para que no nos banee la IP
+                await new Promise(r => setTimeout(r, 1000)); 
+            } else {
+                // Modo mantenimiento normal (solo actualizando velas recientes)
+                await new Promise(r => setTimeout(r, 500));
+            }
         }
-        console.log(`   [OK] ${dbSymbol} sincronizado (+${totalSavedInThisSession} velas).`);
+        // El salto de línea borra el progreso temporal y deja el mensaje final OK
+        console.log(`\n   [OK] ${dbSymbol} sincronizado (+${totalSavedInThisSession} velas).`);
     } catch (error) {
         console.error(`   [X] Error fatal en ${dbSymbol}:`, error.message);
     }
