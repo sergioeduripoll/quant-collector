@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
-import express from 'express'; // Servidor web mínimo
+import express from 'express'; 
 
 // --- CONFIGURACIÓN DE SUPABASE ---
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -24,6 +24,7 @@ app.listen(PORT, () => console.log(`[CLOUD] Servidor de latido en puerto ${PORT}
 
 async function syncCandlesForAsset(symbol) {
     try {
+        // 1. Ver la última vela registrada
         const { data: lastCandle, error: dbError } = await supabase
             .from('candles')
             .select('timestamp')
@@ -34,10 +35,24 @@ async function syncCandlesForAsset(symbol) {
 
         if (dbError) throw dbError;
 
-        // Si no hay datos, retrocedemos exactamente las 50.000 velas
-        let startTime = lastCandle && lastCandle.length > 0 
-            ? lastCandle[0].timestamp 
-            : (Date.now() - (TARGET_CANDLES * 5 * 60 * 1000)); 
+        // 2. SISTEMA DE AUTO-SANACIÓN: Contar cuántas velas reales existen
+        const { count, error: countError } = await supabase
+            .from('candles')
+            .select('*', { count: 'exact', head: true })
+            .eq('symbol', symbol)
+            .eq('interval', INTERVAL);
+
+        let startTime;
+        
+        // Si hay menos de 49.000 velas, ignoramos la última fecha y forzamos la descarga profunda.
+        if (count < 49000) {
+            console.log(`   [!] ${symbol} tiene solo ${count || 0} velas en DB. Forzando descarga histórica profunda...`);
+            startTime = Date.now() - (TARGET_CANDLES * 5 * 60 * 1000);
+        } else if (lastCandle && lastCandle.length > 0) {
+            startTime = lastCandle[0].timestamp; // Flujo normal: continuar desde la última
+        } else {
+            startTime = Date.now() - (TARGET_CANDLES * 5 * 60 * 1000);
+        }
 
         let totalSavedInThisSession = 0;
         let keepFetching = true;
@@ -48,21 +63,19 @@ async function syncCandlesForAsset(symbol) {
             
             let res;
             try {
-                // Hacemos la petición con un timeout más tolerante
                 res = await axios.get(url, { timeout: 15000 });
-                retries = 0; // Reset de intentos si funciona
+                retries = 0; 
             } catch (axiosError) {
                 console.log(`   [!] Reintentando ${symbol}... (Motivo: ${axiosError.message})`);
                 retries++;
                 if (retries >= 3) {
-                    console.error(`   [X] Abortando descarga de ${symbol} tras 3 fallos seguidos.`);
-                    break; // Salimos del bucle para no trabar a los demás activos
+                    console.error(`   [X] Abortando descarga de ${symbol} tras 3 fallos.`);
+                    break; 
                 }
-                await new Promise(r => setTimeout(r, 2000)); // Pausa de 2 seg antes de intentar de nuevo
+                await new Promise(r => setTimeout(r, 2000)); 
                 continue;
             }
             
-            // Si Binance nos devuelve un array vacío, ya llegamos a la actualidad
             if (!res || !res.data || res.data.length === 0) break;
 
             const klines = res.data;
@@ -87,10 +100,8 @@ async function syncCandlesForAsset(symbol) {
             totalSavedInThisSession += rows.length;
             startTime = klines[klines.length - 1][0];
             
-            // Si nos devolvió menos de 1000, es porque llegamos a la vela actual en vivo
             if (klines.length < 1000) keepFetching = false;
             
-            // Un pequeño respiro de 300ms para no saturar a Binance
             await new Promise(r => setTimeout(r, 300)); 
         }
         console.log(`   [OK] ${symbol} sincronizado (+${totalSavedInThisSession} velas).`);
