@@ -111,9 +111,10 @@ async function syncCandlesForAsset(kucoinSymbol) {
             totalSavedInThisSession += rows.length;
             startTime = parseInt(klines[klines.length - 1][0]);
             
-            // LA CLAVE ESTÁ ACÁ: Solo frenamos si KuCoin nos devolvió menos de 1500 
-            // (lo que significa que ya llegamos al minuto actual).
-            if (klines.length < 1500) {
+            // LA CLAVE ESTÁ ACÁ: Ahora somos mucho más permisivos. 
+            // Solo cortamos el bucle si KuCoin devuelve menos de 10 velas (estamos en vivo).
+            // Si devuelve 1499, sigue adelante.
+            if (klines.length < 10) {
                 keepFetching = false;
             } else if (isDeepFetch) {
                 // Si estamos en MODO TURBO llenando la base, imprimimos el progreso parcial
