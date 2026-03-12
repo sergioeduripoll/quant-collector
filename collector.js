@@ -15,8 +15,8 @@ const ASSETS = [
     'SOL-USDT', 'XRP-USDT', 'DOGE-USDT', 'BNB-USDT'
 ];
 
-// KuCoin usa segundos para los intervalos. 5 min = 300
-const INTERVAL = '300'; 
+// KuCoin exige el string '5min' exactamente así para su API
+const INTERVAL = '5min'; 
 const TARGET_CANDLES = 50000;
 
 // --- SERVIDOR DE "LATIDO" (Para que Render no lo apague) ---
@@ -34,7 +34,7 @@ async function syncCandlesForAsset(kucoinSymbol) {
             .from('candles')
             .select('timestamp')
             .eq('symbol', dbSymbol)
-            .eq('interval', '5m') 
+            .eq('interval', '5m') // Mantenemos el '5m' antiguo para la base de datos
             .order('timestamp', { ascending: false })
             .limit(1);
 
@@ -63,7 +63,7 @@ async function syncCandlesForAsset(kucoinSymbol) {
 
         while (keepFetching) {
             const endAt = startTime + (1500 * 5 * 60);
-            // Le pedimos a KuCoin usando el símbolo CON guion (kucoinSymbol)
+            // Petición a KuCoin
             const url = `https://api.kucoin.com/api/v1/market/candles?type=${INTERVAL}&symbol=${kucoinSymbol}&startAt=${startTime + 1}&endAt=${endAt}`;
             
             let res;
@@ -91,7 +91,7 @@ async function syncCandlesForAsset(kucoinSymbol) {
 
             const rows = klines.map(c => ({
                 symbol: dbSymbol, // Lo guardamos SIN guion
-                interval: '5m',
+                interval: '5m',   // Lo guardamos como '5m'
                 timestamp: parseInt(c[0]) * 1000, 
                 open: parseFloat(c[1]),
                 high: parseFloat(c[3]), 
