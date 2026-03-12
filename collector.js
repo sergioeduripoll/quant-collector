@@ -44,7 +44,7 @@ async function syncCandlesForAsset(kucoinSymbol) {
             .eq('interval', '5m');
 
         let startTime;
-        let isDeepFetch = false; // Bandera para saber si estamos en modo "Sanación"
+        let isDeepFetch = false; 
         
         if (count < 49000) {
             console.log(`   [!] ${dbSymbol} tiene solo ${count || 0} velas en DB. Iniciando MODO TURBO para llegar a 50k...`);
@@ -61,6 +61,7 @@ async function syncCandlesForAsset(kucoinSymbol) {
         let totalSavedInThisSession = 0;
         let keepFetching = true;
         let retries = 0;
+        let emptyResponses = 0; // Contador para controlar respuestas vacías de KuCoin
 
         while (keepFetching) {
             // Bloques de 1500 velas (el máximo de KuCoin)
@@ -83,9 +84,21 @@ async function syncCandlesForAsset(kucoinSymbol) {
             }
             
             if (!res || !res.data || !res.data.data || res.data.data.length === 0) {
-                keepFetching = false;
-                break;
+                emptyResponses++;
+                // Si recibimos 3 respuestas vacías consecutivas, asumimos que llegamos al presente
+                if(emptyResponses >= 3) {
+                    keepFetching = false;
+                    break;
+                }
+                // KuCoin a veces devuelve vacío en el pasado. Avanzamos el startTime un bloque para "saltar" el vacío.
+                console.log(`   [?] ${dbSymbol}: Bloque vacío. Saltando hacia adelante...`);
+                startTime = endAt;
+                await new Promise(r => setTimeout(r, 1000));
+                continue;
             }
+            
+            // Si obtuvimos datos, reseteamos el contador de respuestas vacías
+            emptyResponses = 0;
 
             const klines = res.data.data;
             klines.reverse(); 
@@ -111,22 +124,16 @@ async function syncCandlesForAsset(kucoinSymbol) {
             totalSavedInThisSession += rows.length;
             startTime = parseInt(klines[klines.length - 1][0]);
             
-            // LA CLAVE ESTÁ ACÁ: Ahora somos mucho más permisivos. 
-            // Solo cortamos el bucle si KuCoin devuelve menos de 10 velas (estamos en vivo).
-            // Si devuelve 1499, sigue adelante.
+            // Verificación más robusta de finalización
             if (klines.length < 10) {
                 keepFetching = false;
             } else if (isDeepFetch) {
-                // Si estamos en MODO TURBO llenando la base, imprimimos el progreso parcial
                 process.stdout.write(`\r   [*] ${dbSymbol} Progreso: ${totalSavedInThisSession} velas descargadas...`);
-                // Le damos 1 segundo de pausa a KuCoin para que no nos banee la IP
                 await new Promise(r => setTimeout(r, 1000)); 
             } else {
-                // Modo mantenimiento normal (solo actualizando velas recientes)
                 await new Promise(r => setTimeout(r, 500));
             }
         }
-        // El salto de línea borra el progreso temporal y deja el mensaje final OK
         console.log(`\n   [OK] ${dbSymbol} sincronizado (+${totalSavedInThisSession} velas).`);
     } catch (error) {
         console.error(`   [X] Error fatal en ${dbSymbol}:`, error.message);
