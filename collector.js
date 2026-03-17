@@ -24,8 +24,8 @@ const BATCH_SIZE = 1500;
 async function fetchKucoin(symbol, startAt, endAt) {
     try {
         // KuCoin API v1/market/candles
-        // startAt y endAt deben estar en SEGUNDOS
-        let url = `https://api.kucoin.com/api/v1/market/candles?symbol=${symbol}&type=${INTERVAL}`;
+        // Agregamos &limit=${BATCH_SIZE} para que no use el valor por defecto de 100
+        let url = `https://api.kucoin.com/api/v1/market/candles?symbol=${symbol}&type=${INTERVAL}&limit=${BATCH_SIZE}`;
         url += `&startAt=${Math.floor(startAt / 1000)}`;
         url += `&endAt=${Math.floor(endAt / 1000)}`;
         
