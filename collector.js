@@ -1,14 +1,26 @@
-const { createClient } = require('@supabase/supabase-client');
-const axios = require('axios');
+import 'dotenv/config';
+import { createClient } from '@supabase/supabase-js';
+import axios from 'axios';
+import express from 'express';
 
-// Agisayangkat ti husto a huli (Variables de entorno)
+// Configuración de Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+// Configuración de Express para mantener vivo el servicio en Render
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => res.send('Quant Collector Operativo 🚀'));
+app.listen(PORT, () => console.log(`🛰️ Servidor de salud en puerto ${PORT}`));
 
 const ASSETS = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT'];
 const INTERVAL = '5m';
 const MAX_CANDLES = 50000;
-const BATCH_SIZE = 2000; // Cargamos de a 2000 para no romper Render
+const BATCH_SIZE = 2000; 
 
+/**
+ * Obtiene velas de Binance con manejo de errores y límites
+ */
 async function fetchBinance(symbol, limit = 1000, endTime = null) {
     try {
         let url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${INTERVAL}&limit=${limit}`;
@@ -25,29 +37,39 @@ async function fetchBinance(symbol, limit = 1000, endTime = null) {
             volume: parseFloat(d[5])
         }));
     } catch (e) {
-        console.error(`⚠️ Binance error en ${symbol}: ${e.message}`);
+        console.error(`⚠️ Error de Binance en ${symbol}: ${e.message}`);
         return [];
     }
 }
 
+/**
+ * Sincroniza un activo: Llenado progresivo + Update + Purga
+ */
 async function syncAsset(symbol) {
     try {
-        // 1. Conteo actual
+        // 1. Conteo exacto en Supabase
         const { count, error: cErr } = await supabase
             .from('candles')
             .select('*', { count: 'exact', head: true })
             .eq('symbol', symbol);
         
         if (cErr) throw cErr;
-        console.log(`[STATUS] ${symbol}: ${count || 0} velas.`);
+        console.log(`[STATUS] ${symbol}: ${count || 0} velas registradas.`);
 
-        // 2. Llenado Progresivo (Cargamos un lote por cada ejecución)
+        // 2. Llenado Progresivo (BATCH_SIZE) para evitar timeouts en Render
         if ((count || 0) < MAX_CANDLES) {
             console.log(`[LLENADO] Cargando lote histórico para ${symbol}...`);
             let loadedInThisCycle = 0;
             
             while (loadedInThisCycle < BATCH_SIZE) {
-                const { data: oldest } = await supabase.from('candles').select('timestamp').eq('symbol', symbol).order('timestamp', { ascending: true }).limit(1).single();
+                const { data: oldest } = await supabase
+                    .from('candles')
+                    .select('timestamp')
+                    .eq('symbol', symbol)
+                    .order('timestamp', { ascending: true })
+                    .limit(1)
+                    .single();
+
                 const endTime = oldest ? oldest.timestamp - 1 : null;
                 
                 const historical = await fetchBinance(symbol, 1000, endTime);
@@ -57,35 +79,52 @@ async function syncAsset(symbol) {
                 if (insErr) throw insErr;
 
                 loadedInThisCycle += historical.length;
-                await new Promise(r => setTimeout(r, 300)); // Respiro para Binance
+                // Pequeño respiro para la API de Binance
+                await new Promise(r => setTimeout(r, 300)); 
             }
         }
 
-        // 3. Update tiempo real
+        // 3. Actualización de tiempo real (Velas más nuevas)
         const fresh = await fetchBinance(symbol, 50);
-        await supabase.from('candles').upsert(fresh, { onConflict: 'symbol,timestamp' });
+        if (fresh.length > 0) {
+            await supabase.from('candles').upsert(fresh, { onConflict: 'symbol,timestamp' });
+        }
 
-        // 4. Guillotina (Mantener 50k)
-        const { data: threshold } = await supabase.from('candles').select('timestamp').eq('symbol', symbol).order('timestamp', { ascending: false }).range(MAX_CANDLES, MAX_CANDLES).single();
+        // 4. Mantenimiento (Ventana Deslizante de 50k)
+        const { data: threshold } = await supabase
+            .from('candles')
+            .select('timestamp')
+            .eq('symbol', symbol)
+            .order('timestamp', { ascending: false })
+            .range(MAX_CANDLES, MAX_CANDLES)
+            .single();
+
         if (threshold) {
-            await supabase.from('candles').delete().eq('symbol', symbol).lt('timestamp', threshold.timestamp);
-            console.log(`[PURGA] ${symbol} al día.`);
+            await supabase
+                .from('candles')
+                .delete()
+                .eq('symbol', symbol)
+                .lt('timestamp', threshold.timestamp);
+            console.log(`[PURGA] ${symbol}: Base de datos rotada correctamente.`);
         }
 
     } catch (err) {
-        console.error(`[BIDDUT/ERROR] ${symbol}: ${err.message}`);
+        console.error(`[ERROR CRITICO] ${symbol}: ${err.message}`);
     }
 }
 
+/**
+ * Orquestador del ciclo de recolección
+ */
 async function run() {
     console.log(`[${new Date().toLocaleString()}] 🚀 Iniciando ciclo de recolección...`);
     for (const asset of ASSETS) {
         await syncAsset(asset);
         await new Promise(r => setTimeout(r, 500));
     }
-    console.log("✅ Ciclo terminado. Esperando 2 minutos para el próximo lote...");
+    console.log("✅ Ciclo completado. Esperando 2 minutos...");
 }
 
-// Ejecución más frecuente para llenar rápido pero sin crashes
+// Ejecución inicial y bucle
 run();
 setInterval(run, 2 * 60 * 1000);
