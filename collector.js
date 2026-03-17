@@ -10,24 +10,24 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Quant Collector (KuCoin Mode) Activo 🚀'));
-app.listen(PORT, () => console.log(`🛰️ Monitor en puerto ${PORT} - Llenado de alta velocidad activo`));
+app.listen(PORT, () => console.log(`🛰️ Monitor en puerto ${PORT} - Llenado de alta velocidad forzado`));
 
 // Configuración de Activos y Límites
 const ASSETS = ['BTC-USDT', 'ETH-USDT', 'ADA-USDT', 'SOL-USDT', 'XRP-USDT', 'DOGE-USDT', 'BNB-USDT'];
 const INTERVAL = '5min'; 
 const MAX_CANDLES = 50000;
-const BATCH_SIZE = 1500; // Máximo permitido por KuCoin para acelerar la carga
+const BATCH_SIZE = 1500; 
 
 /**
- * Obtiene velas de KuCoin
+ * Obtiene velas de KuCoin forzando una ventana de tiempo de 1500 velas
  */
-async function fetchKucoin(symbol, startAt = null, endAt = null) {
+async function fetchKucoin(symbol, startAt, endAt) {
     try {
-        // Forzamos el límite de 1500 en la URL
-        let url = `https://api.kucoin.com/api/v1/market/candles?symbol=${symbol}&type=${INTERVAL}&limit=${BATCH_SIZE}`;
-        
-        if (startAt) url += `&startAt=${Math.floor(startAt / 1000)}`;
-        if (endAt) url += `&endAt=${Math.floor(endAt / 1000)}`;
+        // KuCoin API v1/market/candles
+        // startAt y endAt deben estar en SEGUNDOS
+        let url = `https://api.kucoin.com/api/v1/market/candles?symbol=${symbol}&type=${INTERVAL}`;
+        url += `&startAt=${Math.floor(startAt / 1000)}`;
+        url += `&endAt=${Math.floor(endAt / 1000)}`;
         
         const res = await axios.get(url, { timeout: 15000 });
         
@@ -69,7 +69,7 @@ async function syncAsset(symbol) {
         let currentCount = count || 0;
         console.log(`[STATUS] ${dbSymbol}: ${currentCount} velas.`);
 
-        // 1. LLENADO HISTÓRICO (Hacia atrás en bloques de 1500)
+        // 1. LLENADO HISTÓRICO (Hacia atrás en bloques forzados de 1500)
         if (currentCount < MAX_CANDLES) {
             const { data: oldest } = await supabase
                 .from('candles')
@@ -79,8 +79,12 @@ async function syncAsset(symbol) {
                 .limit(1)
                 .single();
 
+            // Calculamos la ventana de 1500 velas (1500 * 5 minutos)
             const endAt = oldest ? oldest.timestamp - 1 : Date.now();
-            const historical = await fetchKucoin(symbol, null, endAt);
+            const windowMs = BATCH_SIZE * 5 * 60 * 1000;
+            const startAt = endAt - windowMs;
+
+            const historical = await fetchKucoin(symbol, startAt, endAt);
             
             if (historical.length > 0) {
                 const { error: insErr } = await supabase.from('candles')
@@ -91,18 +95,22 @@ async function syncAsset(symbol) {
                 } else {
                     console.log(`[OK] ${dbSymbol}: +${historical.length} velas históricas.`);
                 }
+            } else {
+                console.log(`[AVISO] No hay más data histórica para ${dbSymbol} en este rango.`);
             }
         }
 
-        // 2. ACTUALIZACIÓN EN VIVO (Velas nuevas)
-        const fresh = await fetchKucoin(symbol);
+        // 2. ACTUALIZACIÓN EN VIVO (Velas nuevas - últimos 30 min)
+        const now = Date.now();
+        const liveStart = now - (30 * 60 * 1000);
+        const fresh = await fetchKucoin(symbol, liveStart, now);
         if (fresh.length > 0) {
             await supabase.from('candles')
-                .upsert(fresh.slice(0, 50), { onConflict: 'symbol,interval,timestamp' });
+                .upsert(fresh, { onConflict: 'symbol,interval,timestamp' });
         }
 
         // 3. PURGA (Límite 50k)
-        if (currentCount > (MAX_CANDLES + 2000)) {
+        if (currentCount > MAX_CANDLES) {
             const { data: threshold } = await supabase
                 .from('candles')
                 .select('timestamp')
@@ -112,8 +120,11 @@ async function syncAsset(symbol) {
                 .single();
 
             if (threshold) {
-                await supabase.from('candles').delete().eq('symbol', dbSymbol).lt('timestamp', threshold.timestamp);
-                console.log(`[PURGA] ${dbSymbol} limpia.`);
+                await supabase.from('candles')
+                    .delete()
+                    .eq('symbol', dbSymbol)
+                    .lt('timestamp', threshold.timestamp);
+                console.log(`[PURGA] ${dbSymbol}: Limpieza ejecutada.`);
             }
         }
 
@@ -123,7 +134,7 @@ async function syncAsset(symbol) {
 }
 
 async function run() {
-    console.log(`\n[${new Date().toLocaleString()}] 🚀 Iniciando ciclo de carga rápida...`);
+    console.log(`\n[${new Date().toLocaleString()}] 🚀 Iniciando ciclo de carga MASIVA...`);
     for (const asset of ASSETS) {
         await syncAsset(asset);
         await new Promise(r => setTimeout(r, 1500)); 
