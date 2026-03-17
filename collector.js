@@ -1,167 +1,82 @@
-import 'dotenv/config';
-import axios from 'axios';
-import { createClient } from '@supabase/supabase-js';
-import express from 'express'; 
+const { createClient } = require('@supabase/supabase-client');
+const axios = require('axios');
 
-// --- CONFIGURACIÓN DE SUPABASE ---
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Configuración de Supabase (usá tus variables de entorno)
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- CONFIGURACIÓN DE ACTIVOS ---
-const ASSETS = [
-    'BTC-USDT', 'ETH-USDT', 'ADA-USDT', 'LTC-USDT',
-    'SOL-USDT', 'XRP-USDT', 'DOGE-USDT', 'BNB-USDT'
-];
+const ASSETS = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT'];
+const INTERVAL = '5m';
+const MAX_CANDLES = 50000;
 
-const INTERVAL = '5min'; 
-const TARGET_CANDLES = 50000;
+// Función para obtener velas de Binance
+async function fetchBinance(symbol, limit = 1000) {
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${INTERVAL}&limit=${limit}`;
+    const res = await axios.get(url);
+    return res.data.map(d => ({
+        symbol: symbol,
+        interval: INTERVAL,
+        timestamp: d[0],
+        open: parseFloat(d[1]),
+        high: parseFloat(d[2]),
+        low: parseFloat(d[3]),
+        close: parseFloat(d[4]),
+        volume: parseFloat(d[5])
+    }));
+}
 
-// --- SERVIDOR DE "LATIDO" (Para que Render no lo apague) ---
-const app = express();
-app.get('/', (req, res) => res.send('🚀 QUANT SNIPER COLLECTOR - ACTIVO Y OPERANDO'));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[CLOUD] Servidor de latido en puerto ${PORT}`));
-
-async function syncCandlesForAsset(kucoinSymbol) {
-    const dbSymbol = kucoinSymbol.replace('-', '');
-    
+// Lógica de sincronización con Ventana Deslizante
+async function syncAsset(symbol) {
     try {
-        // 1. Contamos cuántas velas tenemos realmente
-        const { count, error: countError } = await supabase
+        console.log(`[PROCESO] Sincronizando ${symbol}...`);
+
+        // 1. Traer las últimas velas de Binance
+        const candles = await fetchBinance(symbol, 1000);
+
+        // 2. UPSERT: Insertar o actualizar para evitar duplicados
+        const { error: upsertError } = await supabase
             .from('candles')
-            .select('*', { count: 'exact', head: true })
-            .eq('symbol', dbSymbol)
-            .eq('interval', '5m');
+            .upsert(candles, { onConflict: 'symbol,timestamp' });
 
-        if (countError) throw countError;
+        if (upsertError) throw upsertError;
 
-        if (count < 49000) {
-            // ==============================================
-            // MODO TURBO: PAGINACIÓN HACIA ATRÁS (REVERSE)
-            // ==============================================
-            console.log(`   [!] ${dbSymbol} tiene solo ${count || 0} velas en DB. Iniciando MODO TURBO (Hacia el pasado)...`);
+        // 3. MANTENIMIENTO: Borrar excedente (Límite 50,000)
+        // Buscamos el timestamp de la vela 50k para usarlo de guillotina
+        const { data: limitCandle } = await supabase
+            .from('candles')
+            .select('timestamp')
+            .eq('symbol', symbol)
+            .order('timestamp', { ascending: false })
+            .range(MAX_CANDLES, MAX_CANDLES)
+            .single();
+
+        if (limitCandle) {
+            const { error: deleteError } = await supabase
+                .from('candles')
+                .delete()
+                .eq('symbol', symbol)
+                .lt('timestamp', limitCandle.timestamp);
             
-            let currentEndAt = Math.floor(Date.now() / 1000); // Empezamos AHORA MISMO
-            let totalSavedInThisSession = 0;
-            let keepFetching = true;
-            let retries = 0;
-            let targetToFetch = TARGET_CANDLES - (count || 0);
-
-            while (keepFetching && totalSavedInThisSession < targetToFetch) {
-                // Pedimos a KuCoin que nos dé todo lo que haya ANTES de 'currentEndAt'
-                const url = `https://api.kucoin.com/api/v1/market/candles?type=${INTERVAL}&symbol=${kucoinSymbol}&endAt=${currentEndAt}`;
-                
-                let res;
-                try {
-                    res = await axios.get(url, { timeout: 15000 });
-                    retries = 0; 
-                } catch (axiosError) {
-                    console.log(`\n   [!] Reintentando ${dbSymbol}... (Motivo: ${axiosError.message})`);
-                    retries++;
-                    if (retries >= 3) {
-                        console.error(`   [X] Abortando descarga de ${dbSymbol} tras 3 fallos.`);
-                        break; 
-                    }
-                    await new Promise(r => setTimeout(r, 2000)); 
-                    continue;
-                }
-                
-                if (!res || !res.data || !res.data.data || res.data.data.length === 0) {
-                    console.log(`\n   [?] Se alcanzó el origen de los tiempos para ${dbSymbol}. Fin de la historia.`);
-                    break;
-                }
-
-                // KuCoin entrega desde lo más nuevo a lo más viejo
-                const klines = res.data.data; 
-
-                const rows = klines.map(c => ({
-                    symbol: dbSymbol, 
-                    interval: '5m',   
-                    timestamp: parseInt(c[0]) * 1000, 
-                    open: parseFloat(c[1]),
-                    high: parseFloat(c[3]), 
-                    low: parseFloat(c[4]),  
-                    close: parseFloat(c[2]),
-                    volume: parseFloat(c[5])
-                }));
-
-                const { error } = await supabase.from('candles').upsert(rows, { 
-                    onConflict: 'symbol, interval, timestamp', 
-                    ignoreDuplicates: true 
-                });
-                
-                if (error) throw error;
-
-                totalSavedInThisSession += rows.length;
-                
-                // LA MAGIA DE IR HACIA ATRÁS:
-                // Tomamos el timestamp de la vela más vieja que nos dio (la última del array) y le restamos 1 segundo.
-                // En el siguiente ciclo, pedirá desde ese momento hacia el pasado.
-                currentEndAt = parseInt(klines[klines.length - 1][0]) - 1;
-                
-                process.stdout.write(`\r   [*] ${dbSymbol} Progreso: ${totalSavedInThisSession} velas históricas succionadas...`);
-                
-                if (klines.length < 10) keepFetching = false;
-                
-                await new Promise(r => setTimeout(r, 1000)); // Respiro para la API
-            }
-            console.log(`\n   [OK] ${dbSymbol} MODO TURBO Finalizado (+${totalSavedInThisSession} velas).`);
-            
-        } else {
-            // ==============================================
-            // MODO MANTENIMIENTO (Vuelo Crucero)
-            // ==============================================
-            // Simplemente bajamos el paquete más reciente y actualizamos. Supabase ignora las repetidas.
-            const url = `https://api.kucoin.com/api/v1/market/candles?type=${INTERVAL}&symbol=${kucoinSymbol}`;
-            let res;
-            try {
-                res = await axios.get(url, { timeout: 15000 });
-            } catch (e) {
-                console.log(`   [!] Fallo mantenimiento ${dbSymbol}. Se intentará en 5 min.`);
-                return;
-            }
-
-            if (res && res.data && res.data.data) {
-                const klines = res.data.data;
-                const rows = klines.map(c => ({
-                    symbol: dbSymbol, 
-                    interval: '5m',   
-                    timestamp: parseInt(c[0]) * 1000, 
-                    open: parseFloat(c[1]),
-                    high: parseFloat(c[3]), 
-                    low: parseFloat(c[4]),  
-                    close: parseFloat(c[2]),
-                    volume: parseFloat(c[5])
-                }));
-
-                const { error } = await supabase.from('candles').upsert(rows, { 
-                    onConflict: 'symbol, interval, timestamp', 
-                    ignoreDuplicates: true 
-                });
-                
-                if (error) throw error;
-                console.log(`   [OK] ${dbSymbol} sincronizado (Mantenimiento al día).`);
-            }
+            if (deleteError) console.error(`[LIMPIEZA] Error en ${symbol}:`, deleteError);
+            else console.log(`[OK] ${symbol}: Base de datos purgada.`);
         }
-    } catch (error) {
-        console.error(`   [X] Error fatal en ${dbSymbol}:`, error.message);
+
+        console.log(`[EXITO] ${symbol} al día.`);
+    } catch (err) {
+        console.error(`[ERROR] Falló ${symbol}:`, err.message);
     }
 }
 
-async function runCollector() {
-    console.log("\n=========================================");
-    console.log("   QUANT SNIPER - CLOUD ENGINE V12.5");
-    console.log(`   ${new Date().toLocaleString()}`);
-    console.log("=========================================");
-
+// Ciclo principal
+async function run() {
+    console.log("🚀 Iniciando Ciclo de Recolección Institucional...");
     for (const asset of ASSETS) {
-        await syncCandlesForAsset(asset);
+        await syncAsset(asset);
+        // Pequeño delay para no saturar la API
+        await new Promise(r => setTimeout(r, 1000));
     }
-
-    console.log("\n✅ CICLO COMPLETADO. Esperando 5 min...");
-    setTimeout(runCollector, 5 * 60 * 1000);
+    console.log("✅ Ciclo completado. Durmiendo 5 min...");
 }
 
-// Arrancar el motor
-runCollector();
+// Ejecutar cada 5 minutos
+run();
+setInterval(run, 5 * 60 * 1000);
