@@ -6,128 +6,126 @@ import express from 'express';
 // Configuración de Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// Express para que Render no apague el servicio
+// Express para que Render vea actividad web y no apague el proceso
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Quant Sniper Collector - Cloud Active 🚀'));
-app.listen(PORT, () => console.log(`🛰️ Servidor de salud en puerto ${PORT}`));
+app.get('/', (req, res) => res.send('Quant Collector (KuCoin Mode) Operativo 🚀'));
+app.listen(PORT, () => console.log(`🛰️ Monitor activo en puerto ${PORT} - Usando KuCoin API`));
 
-const ASSETS = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT'];
-const INTERVAL = '5m';
+// KuCoin usa el formato ASSET-USDT
+const ASSETS = ['BTC-USDT', 'ETH-USDT', 'ADA-USDT', 'SOL-USDT', 'XRP-USDT', 'DOGE-USDT', 'BNB-USDT'];
+const INTERVAL = '5min'; // KuCoin usa '5min' en lugar de '5m'
 const MAX_CANDLES = 50000;
-const BATCH_SIZE = 2000; 
-
-// === ESTRATEGIA DE EVASIÓN 451 ===
-// Probamos diferentes puertas de entrada de Binance para esquivar el bloqueo regional de Render
-const BINANCE_ENDPOINTS = [
-    'https://api.binance.com/api/v3',
-    'https://api-g.binance.com/api/v3', // Gateway Global (Suele saltar bloqueos)
-    'https://api1.binance.com/api/v3',
-    'https://api2.binance.com/api/v3',
-    'https://api3.binance.com/api/v3'
-];
-let currentEndpointIdx = 0;
+const BATCH_SIZE = 1500; // KuCoin permite hasta 1500 velas por petición
 
 /**
- * Obtiene velas con rotación automática de servidor en caso de bloqueo 451
+ * Obtiene velas de KuCoin API
+ * Formato respuesta KuCoin: [time, open, close, high, low, volume, turnover]
  */
-async function fetchBinance(symbol, limit = 1000, endTime = null) {
-    const maxTries = BINANCE_ENDPOINTS.length;
-    
-    for (let i = 0; i < maxTries; i++) {
-        const baseUrl = BINANCE_ENDPOINTS[currentEndpointIdx];
-        let url = `${baseUrl}/klines?symbol=${symbol}&interval=${INTERVAL}&limit=${limit}`;
-        if (endTime) url += `&endTime=${endTime}`;
-
-        try {
-            const res = await axios.get(url, { timeout: 10000 });
-            return res.data.map(d => ({
-                symbol: symbol,
-                interval: INTERVAL,
-                timestamp: d[0],
-                open: parseFloat(d[1]),
-                high: parseFloat(d[2]),
-                low: parseFloat(d[3]),
-                close: parseFloat(d[4]),
-                volume: parseFloat(d[5])
-            }));
-        } catch (e) {
-            const status = e.response?.status;
-            if (status === 451) {
-                console.warn(`⚠️ [BLOQUEO 451] El endpoint ${baseUrl} bloqueó a Render. Saltando al siguiente...`);
-                currentEndpointIdx = (currentEndpointIdx + 1) % BINANCE_ENDPOINTS.length;
-                continue; // Intenta con el próximo endpoint
-            }
-            console.error(`❌ Error en ${baseUrl}: ${e.message}`);
-            break; 
+async function fetchKucoin(symbol, startAt = null) {
+    try {
+        let url = `https://api.kucoin.com/api/v1/market/candles?symbol=${symbol}&type=${INTERVAL}`;
+        if (startAt) {
+            // KuCoin pide segundos, no milisegundos
+            url += `&startAt=${Math.floor(startAt / 1000)}`;
         }
+        
+        const res = await axios.get(url, { timeout: 15000 });
+        
+        if (!res.data || !res.data.data) return [];
+
+        // KuCoin devuelve las velas de la más nueva a la más vieja
+        return res.data.data.map(d => ({
+            symbol: symbol.replace('-', ''), // Guardamos como BTCUSDT para que sea compatible con el resto del sistema
+            interval: '5m',
+            timestamp: parseInt(d[0]) * 1000, // Convertimos a milisegundos
+            open: parseFloat(d[1]),
+            close: parseFloat(d[2]),
+            high: parseFloat(d[3]),
+            low: parseFloat(d[4]),
+            volume: parseFloat(d[5])
+        }));
+    } catch (e) {
+        console.error(`⚠️ Error de KuCoin en ${symbol}: ${e.message}`);
+        return [];
     }
-    return [];
 }
 
+/**
+ * Sincronización con Llenado Progresivo (KuCoin Edition)
+ */
 async function syncAsset(symbol) {
+    const dbSymbol = symbol.replace('-', '');
     try {
         const { count, error: cErr } = await supabase
             .from('candles')
             .select('*', { count: 'exact', head: true })
-            .eq('symbol', symbol);
+            .eq('symbol', dbSymbol);
         
         if (cErr) throw cErr;
         
         let currentCount = count || 0;
-        console.log(`[STATUS] ${symbol}: ${currentCount} velas.`);
+        console.log(`[STATUS] ${dbSymbol}: ${currentCount} velas en DB.`);
 
+        // 1. LLENADO PROFUNDO
         if (currentCount < MAX_CANDLES) {
-            console.log(`[LLENADO] Descargando bloque histórico para ${symbol}...`);
-            let loadedInCycle = 0;
+            console.log(`[LLENADO] Descargando bloque de KuCoin para ${dbSymbol}...`);
             
-            while (loadedInCycle < BATCH_SIZE && currentCount < MAX_CANDLES) {
-                const { data: oldest } = await supabase.from('candles')
-                    .select('timestamp')
-                    .eq('symbol', symbol)
-                    .order('timestamp', { ascending: true })
-                    .limit(1)
-                    .single();
+            const { data: oldest } = await supabase
+                .from('candles')
+                .select('timestamp')
+                .eq('symbol', dbSymbol)
+                .order('timestamp', { ascending: true })
+                .limit(1)
+                .single();
 
-                const endTime = oldest ? oldest.timestamp - 1 : null;
-                const historical = await fetchBinance(symbol, 1000, endTime);
-                
-                if (historical.length === 0) {
-                    console.log(`[AVISO] No se pudo obtener más data para ${symbol} en este ciclo.`);
-                    break;
-                }
+            // KuCoin permite pedir data histórica usando startAt y endAt
+            // Para ir hacia atrás, calculamos un bloque anterior al más viejo que tenemos
+            const pivotTime = oldest ? oldest.timestamp : Date.now();
+            const startTime = pivotTime - (BATCH_SIZE * 5 * 60 * 1000); 
 
+            const historical = await fetchKucoin(symbol, startTime);
+            
+            if (historical.length > 0) {
                 const { error: insErr } = await supabase.from('candles').upsert(historical, { onConflict: 'symbol,timestamp' });
                 if (insErr) throw insErr;
-
-                loadedInCycle += historical.length;
-                currentCount += historical.length;
-                await new Promise(r => setTimeout(r, 400)); 
+                console.log(`[OK] ${dbSymbol} sumó ${historical.length} velas del pasado.`);
             }
         }
 
-        // Actualización tiempo real
-        const fresh = await fetchBinance(symbol, 20);
-        if (fresh.length > 0) await supabase.from('candles').upsert(fresh, { onConflict: 'symbol,timestamp' });
+        // 2. UPDATE TIEMPO REAL
+        const fresh = await fetchKucoin(symbol);
+        if (fresh.length > 0) {
+            await supabase.from('candles').upsert(fresh.slice(0, 50), { onConflict: 'symbol,timestamp' });
+        }
 
-        // Guillotina (Rotación 50k)
+        // 3. MANTENIMIENTO (Guillotina 50k)
         if (currentCount >= MAX_CANDLES) {
-            const { data: limit } = await supabase.from('candles').select('timestamp').eq('symbol', symbol).order('timestamp', { ascending: false }).range(MAX_CANDLES, MAX_CANDLES).single();
-            if (limit) await supabase.from('candles').delete().eq('symbol', symbol).lt('timestamp', limit.timestamp);
+            const { data: threshold } = await supabase
+                .from('candles')
+                .select('timestamp')
+                .eq('symbol', dbSymbol)
+                .order('timestamp', { ascending: false })
+                .range(MAX_CANDLES, MAX_CANDLES)
+                .single();
+
+            if (threshold) {
+                await supabase.from('candles').delete().eq('symbol', dbSymbol).lt('timestamp', threshold.timestamp);
+            }
         }
 
     } catch (err) {
-        console.error(`[ERROR] ${symbol}: ${err.message}`);
+        console.error(`[ERROR] ${dbSymbol}: ${err.message}`);
     }
 }
 
 async function run() {
-    console.log(`\n[${new Date().toLocaleString()}] 🚀 Ciclo de recolección en la nube...`);
+    console.log(`\n[${new Date().toLocaleString()}] 🚀 Iniciando ciclo KuCoin...`);
     for (const asset of ASSETS) {
         await syncAsset(asset);
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 1000)); // Respiro para KuCoin
     }
-    console.log("✅ Ciclo completado. Esperando 2 minutos...");
+    console.log("✅ Lote completado. KuCoin es mucho más rápido. Próximo ciclo en 2 min...");
 }
 
 run();
