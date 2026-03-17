@@ -84,7 +84,8 @@ async function syncAsset(symbol) {
             const historical = await fetchKucoin(symbol, null, endAt);
             
             if (historical.length > 0) {
-                const { error: insErr } = await supabase.from('candles').upsert(historical, { onConflict: 'symbol,timestamp' });
+                // CORRECCIÓN CRÍTICA: onConflict debe incluir 'interval' para coincidir con la Primary Key de la tabla
+                const { error: insErr } = await supabase.from('candles').upsert(historical, { onConflict: 'symbol,interval,timestamp' });
                 if (insErr) throw insErr;
                 console.log(`[OK] ${dbSymbol}: Se sumaron ${historical.length} velas históricas.`);
             }
@@ -93,7 +94,8 @@ async function syncAsset(symbol) {
         // 2. ACTUALIZACIÓN EN VIVO (Velas nuevas)
         const fresh = await fetchKucoin(symbol);
         if (fresh.length > 0) {
-            await supabase.from('candles').upsert(fresh.slice(0, 50), { onConflict: 'symbol,timestamp' });
+            // CORRECCIÓN CRÍTICA: onConflict debe incluir 'interval'
+            await supabase.from('candles').upsert(fresh.slice(0, 50), { onConflict: 'symbol,interval,timestamp' });
         }
 
         // 3. PURGA (Límite 50k)
