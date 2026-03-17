@@ -10,20 +10,22 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Quant Collector (KuCoin Mode) Activo 🚀'));
-app.listen(PORT, () => console.log(`🛰️ Monitor en puerto ${PORT} - Evasión de conflictos activa`));
+app.listen(PORT, () => console.log(`🛰️ Monitor en puerto ${PORT} - Llenado de alta velocidad activo`));
 
 // Configuración de Activos y Límites
 const ASSETS = ['BTC-USDT', 'ETH-USDT', 'ADA-USDT', 'SOL-USDT', 'XRP-USDT', 'DOGE-USDT', 'BNB-USDT'];
 const INTERVAL = '5min'; 
 const MAX_CANDLES = 50000;
-const BATCH_SIZE = 1500; 
+const BATCH_SIZE = 1500; // Máximo permitido por KuCoin para acelerar la carga
 
 /**
  * Obtiene velas de KuCoin
  */
 async function fetchKucoin(symbol, startAt = null, endAt = null) {
     try {
+        // Forzamos el límite de 1500 en la URL
         let url = `https://api.kucoin.com/api/v1/market/candles?symbol=${symbol}&type=${INTERVAL}&limit=${BATCH_SIZE}`;
+        
         if (startAt) url += `&startAt=${Math.floor(startAt / 1000)}`;
         if (endAt) url += `&endAt=${Math.floor(endAt / 1000)}`;
         
@@ -31,6 +33,7 @@ async function fetchKucoin(symbol, startAt = null, endAt = null) {
         
         if (!res.data || !res.data.data) return [];
 
+        // Mapeo al formato compatible
         return res.data.data.map(d => ({
             symbol: symbol.replace('-', ''), 
             interval: '5m',
@@ -66,7 +69,7 @@ async function syncAsset(symbol) {
         let currentCount = count || 0;
         console.log(`[STATUS] ${dbSymbol}: ${currentCount} velas.`);
 
-        // 1. LLENADO HISTÓRICO (Solo si falta data)
+        // 1. LLENADO HISTÓRICO (Hacia atrás en bloques de 1500)
         if (currentCount < MAX_CANDLES) {
             const { data: oldest } = await supabase
                 .from('candles')
@@ -80,7 +83,6 @@ async function syncAsset(symbol) {
             const historical = await fetchKucoin(symbol, null, endAt);
             
             if (historical.length > 0) {
-                // USANDO LA LLAVE EXACTA DE TU TABLA: symbol,interval,timestamp
                 const { error: insErr } = await supabase.from('candles')
                     .upsert(historical, { onConflict: 'symbol,interval,timestamp' });
                 
@@ -92,7 +94,7 @@ async function syncAsset(symbol) {
             }
         }
 
-        // 2. ACTUALIZACIÓN EN VIVO
+        // 2. ACTUALIZACIÓN EN VIVO (Velas nuevas)
         const fresh = await fetchKucoin(symbol);
         if (fresh.length > 0) {
             await supabase.from('candles')
@@ -121,7 +123,7 @@ async function syncAsset(symbol) {
 }
 
 async function run() {
-    console.log(`\n[${new Date().toLocaleString()}] 🚀 Ciclo KuCoin iniciado...`);
+    console.log(`\n[${new Date().toLocaleString()}] 🚀 Iniciando ciclo de carga rápida...`);
     for (const asset of ASSETS) {
         await syncAsset(asset);
         await new Promise(r => setTimeout(r, 1500)); 
