@@ -11,7 +11,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => res.send('Quant Collector Operativo 🚀'));
-app.listen(PORT, () => console.log(`🛰️ Servidor de salud en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🛰️ Servidor de salud activo en puerto ${PORT}`));
 
 const ASSETS = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT'];
 const INTERVAL = '5m';
@@ -56,12 +56,14 @@ async function syncAsset(symbol) {
         if (cErr) throw cErr;
         console.log(`[STATUS] ${symbol}: ${count || 0} velas registradas.`);
 
+        let currentCount = count || 0;
+
         // 2. Llenado Progresivo (BATCH_SIZE) para evitar timeouts en Render
-        if ((count || 0) < MAX_CANDLES) {
-            console.log(`[LLENADO] Cargando lote histórico para ${symbol}...`);
+        if (currentCount < MAX_CANDLES) {
+            console.log(`[LLENADO] Recuperando historial para ${symbol}...`);
             let loadedInThisCycle = 0;
             
-            while (loadedInThisCycle < BATCH_SIZE) {
+            while (loadedInThisCycle < BATCH_SIZE && currentCount < MAX_CANDLES) {
                 const { data: oldest } = await supabase
                     .from('candles')
                     .select('timestamp')
@@ -75,13 +77,15 @@ async function syncAsset(symbol) {
                 const historical = await fetchBinance(symbol, 1000, endTime);
                 if (historical.length === 0) break;
 
-                const { error: insErr } = await supabase.from('candles').upsert(historical);
+                const { error: insErr } = await supabase.from('candles').upsert(historical, { onConflict: 'symbol,timestamp' });
                 if (insErr) throw insErr;
 
                 loadedInThisCycle += historical.length;
+                currentCount += historical.length;
                 // Pequeño respiro para la API de Binance
                 await new Promise(r => setTimeout(r, 300)); 
             }
+            console.log(`[HISTÓRICO] ${symbol} alcanzó ${currentCount} velas.`);
         }
 
         // 3. Actualización de tiempo real (Velas más nuevas)
@@ -91,21 +95,23 @@ async function syncAsset(symbol) {
         }
 
         // 4. Mantenimiento (Ventana Deslizante de 50k)
-        const { data: threshold } = await supabase
-            .from('candles')
-            .select('timestamp')
-            .eq('symbol', symbol)
-            .order('timestamp', { ascending: false })
-            .range(MAX_CANDLES, MAX_CANDLES)
-            .single();
-
-        if (threshold) {
-            await supabase
+        if (currentCount >= MAX_CANDLES) {
+            const { data: threshold } = await supabase
                 .from('candles')
-                .delete()
+                .select('timestamp')
                 .eq('symbol', symbol)
-                .lt('timestamp', threshold.timestamp);
-            console.log(`[PURGA] ${symbol}: Base de datos rotada correctamente.`);
+                .order('timestamp', { ascending: false })
+                .range(MAX_CANDLES, MAX_CANDLES)
+                .single();
+
+            if (threshold) {
+                await supabase
+                    .from('candles')
+                    .delete()
+                    .eq('symbol', symbol)
+                    .lt('timestamp', threshold.timestamp);
+                console.log(`[PURGA] ${symbol}: Base de datos rotada correctamente.`);
+            }
         }
 
     } catch (err) {
@@ -119,7 +125,11 @@ async function syncAsset(symbol) {
 async function run() {
     console.log(`[${new Date().toLocaleString()}] 🚀 Iniciando ciclo de recolección...`);
     for (const asset of ASSETS) {
-        await syncAsset(asset);
+        try {
+            await syncAsset(asset);
+        } catch (e) {
+            console.error(`❌ Fallo fatal en ciclo para ${asset}: ${e.message}`);
+        }
         await new Promise(r => setTimeout(r, 500));
     }
     console.log("✅ Ciclo completado. Esperando 2 minutos...");
